@@ -7,6 +7,8 @@ import (
 	"net"
 	"reflect"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,6 +104,20 @@ func TestWith(t *testing.T) {
 	caller := fmt.Sprintf("%s:%d", file, line+3)
 	log := ctx.Caller().Logger()
 	log.Log().Msg("")
+	if got, want := decodeIfBinaryToString(out.Bytes()), `{"string":"foo","bytes":"bar","hex":"12ef","json":{"some":"json"},"error":"some error","bool":true,"int":1,"int8":2,"int16":3,"int32":4,"int64":5,"uint":6,"uint8":7,"uint16":8,"uint32":9,"uint64":10,"float32":11.101,"float64":12.30303,"time":"0001-01-01T00:00:00Z","caller":"`+caller+`"}`+"\n"; got != want {
+		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
+	}
+
+	// Validate CallerWithSkipFrameCount.
+	out.Reset()
+	_, file, line, _ = runtime.Caller(0)
+	caller = fmt.Sprintf("%s:%d", file, line+5)
+	log = ctx.CallerWithSkipFrameCount(3).Logger()
+	func() {
+		log.Log().Msg("")
+	}()
+	// The above line is a little contrived, but the line above should be the line due
+	// to the extra frame skip.
 	if got, want := decodeIfBinaryToString(out.Bytes()), `{"string":"foo","bytes":"bar","hex":"12ef","json":{"some":"json"},"error":"some error","bool":true,"int":1,"int8":2,"int16":3,"int32":4,"int64":5,"uint":6,"uint8":7,"uint16":8,"uint32":9,"uint64":10,"float32":11.101,"float64":12.30303,"time":"0001-01-01T00:00:00Z","caller":"`+caller+`"}`+"\n"; got != want {
 		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
 	}
@@ -638,5 +654,95 @@ func TestErrorMarshalFunc(t *testing.T) {
 	log.Log().Err(errors.New("err")).Msg("msg")
 	if got, want := decodeIfBinaryToString(out.Bytes()), `{"error":{"message":"err: loggableError"},"message":"msg"}`+"\n"; got != want {
 		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
+	}
+}
+
+func TestCallerMarshalFunc(t *testing.T) {
+	out := &bytes.Buffer{}
+	log := New(out)
+
+	// test default behaviour this is really brittle due to the line numbers
+	// actually mattering for validation
+	_, file, line, _ := runtime.Caller(0)
+	caller := fmt.Sprintf("%s:%d", file, line+2)
+	log.Log().Caller().Msg("msg")
+	if got, want := decodeIfBinaryToString(out.Bytes()), `{"caller":"`+caller+`","message":"msg"}`+"\n"; got != want {
+		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
+	}
+	out.Reset()
+
+	// test custom behavior. In this case we'll take just the last directory
+	origCallerMarshalFunc := CallerMarshalFunc
+	defer func() { CallerMarshalFunc = origCallerMarshalFunc }()
+	CallerMarshalFunc = func(file string, line int) string {
+		parts := strings.Split(file, "/")
+		if len(parts) > 1 {
+			return strings.Join(parts[len(parts)-2:], "/") + ":" + strconv.Itoa(line)
+		} else {
+			return file + ":" + strconv.Itoa(line)
+		}
+	}
+	_, file, line, _ = runtime.Caller(0)
+	caller = CallerMarshalFunc(file, line+2)
+	log.Log().Caller().Msg("msg")
+	if got, want := decodeIfBinaryToString(out.Bytes()), `{"caller":"`+caller+`","message":"msg"}`+"\n"; got != want {
+		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
+	}
+}
+
+func TestLevelFieldMarshalFunc(t *testing.T) {
+	origLevelFieldMarshalFunc := LevelFieldMarshalFunc
+	LevelFieldMarshalFunc = func(l Level) string {
+		return strings.ToUpper(l.String())
+	}
+	defer func() {
+		LevelFieldMarshalFunc = origLevelFieldMarshalFunc
+	}()
+	out := &bytes.Buffer{}
+	log := New(out)
+
+	log.Debug().Msg("test")
+	if got, want := decodeIfBinaryToString(out.Bytes()), `{"level":"DEBUG","message":"test"}`+"\n"; got != want {
+		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
+	}
+	out.Reset()
+
+	log.Info().Msg("test")
+	if got, want := decodeIfBinaryToString(out.Bytes()), `{"level":"INFO","message":"test"}`+"\n"; got != want {
+		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
+	}
+	out.Reset()
+
+	log.Warn().Msg("test")
+	if got, want := decodeIfBinaryToString(out.Bytes()), `{"level":"WARN","message":"test"}`+"\n"; got != want {
+		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
+	}
+	out.Reset()
+
+	log.Error().Msg("test")
+	if got, want := decodeIfBinaryToString(out.Bytes()), `{"level":"ERROR","message":"test"}`+"\n"; got != want {
+		t.Errorf("invalid log output:\ngot:  %v\nwant: %v", got, want)
+	}
+	out.Reset()
+}
+
+type errWriter struct {
+	error
+}
+
+func (w errWriter) Write(p []byte) (n int, err error) {
+	return 0, w.error
+}
+
+func TestErrorHandler(t *testing.T) {
+	var got error
+	want := errors.New("write error")
+	ErrorHandler = func(err error) {
+		got = err
+	}
+	log := New(errWriter{want})
+	log.Log().Msg("test")
+	if got != want {
+		t.Errorf("ErrorHandler err = %#v, want %#v", got, want)
 	}
 }
